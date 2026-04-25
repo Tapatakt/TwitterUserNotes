@@ -1,0 +1,24 @@
+{
+  "manifest_version": 3,
+  "name": "Twitter User Notes",
+  "version": "1.0",
+  "description": "Добавляет редактируемые комментарии к ссылкам на пользователей Twitter/X",
+  "permissions": [
+    "storage"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "*://x.com/*",
+        "*://twitter.com/*"
+      ],
+      "js": [
+        "content-scripts/storage.js",
+        "content-scripts/tooltip.js",
+        "content-scripts/link-detector.js",
+        "content-scripts/content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
+}
