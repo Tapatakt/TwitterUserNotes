@@ -1,27 +1,24 @@
 /**
- * Модуль обнаружения ссылок на пользователей Twitter/X.
+ * Модуль обнаружения пользователей Twitter/X.
  *
- * Ключевые изменения:
- * - Ищем ближайшую ссылку ВВЕРХ по дереву через .closest('a'),
- *   потому что в Twitter/X внутри <a> лежат <span>, <img> и т.д.
- * - Парсим URL через new URL() и проверяем pathname,
- *   а не гоняемся за regex на всю строку.
- * - Content script теперь внедряется только на x.com / twitter.com,
- *   поэтому относительные ссылки типа "/UserName" корректно резолвятся.
+ * Гибридная логика:
+ * 1. Сначала ищем <span> или <a>, чей textContent (trim) строго равен @UserName.
+ *    Это ловит упоминания в тексте твитов и шапки ретвитов.
+ * 2. Если текст не подошёл — ищем ближайший <a> и проверяем его href.
+ *    Это ловит ссылки на профиль без @ (например, "UserName нравится ваш ответ").
+ *
+ * В обоих случаях используем .closest(), чтобы наведение на вложенные теги
+ * (внутри span или ссылки) тоже срабатывало.
  */
 
 const LinkDetector = (function () {
   'use strict';
 
-  // Активная ссылка, на которую наведён курсор
-  let currentLink = null;
-  // Таймер на показ подсказки (0.5 сек)
+  let currentTarget = null;
   let showTimer = null;
-  // Таймер на скрытие подсказки (0.5 сек)
   let hideTimer = null;
 
-  // Список зарезервированных имён, которые Twitter/X использует для своих страниц.
-  // Эти пути могут выглядеть как /UserName, но на самом деле это не профили.
+  // Системные имена Twitter/X
   const RESERVED_USERNAMES = new Set([
     'home',
     'explore',
@@ -31,10 +28,38 @@ const LinkDetector = (function () {
   ]);
 
   /**
-   * Ищет ближайшую ссылку-родителя для элемента и проверяет,
-   * ведёт ли она на профиль пользователя x.com / twitter.com.
+   * Пытается найти упоминание @UserName в тексте элемента.
+   * Ищет ближайший <span> или <a> и проверяет его textContent.
    * @param {HTMLElement} element
-   * @returns {{element: HTMLAnchorElement, username: string} | null}
+   * @returns {{element: HTMLElement, username: string} | null}
+   */
+  function findUserMention(element) {
+    const container = element.closest('span, a');
+    if (!container) {
+      return null;
+    }
+
+    const text = container.textContent.trim();
+    const match = text.match(/^@([A-Za-z0-9_]{1,15})$/);
+    if (!match) {
+      return null;
+    }
+
+    const username = match[1];
+    if (RESERVED_USERNAMES.has(username.toLowerCase())) {
+      return null;
+    }
+
+    return {
+      element: container,
+      username: username
+    };
+  }
+
+  /**
+   * Пытается найти профиль по href ближайшей ссылки.
+   * @param {HTMLElement} element
+   * @returns {{element: HTMLElement, username: string} | null}
    */
   function findUserLink(element) {
     const link = element.closest('a');
@@ -42,8 +67,6 @@ const LinkDetector = (function () {
       return null;
     }
 
-    // Браузер всегда возвращает абсолютный URL в link.href,
-    // даже если в разметке было href="/UserName"
     let url;
     try {
       url = new URL(link.href);
@@ -51,22 +74,17 @@ const LinkDetector = (function () {
       return null;
     }
 
-    // Проверяем хост (учитываем возможные поддомены типа mobile.x.com, хотя маловероятно)
     const host = url.hostname.toLowerCase();
     if (host !== 'x.com' && host !== 'twitter.com') {
       return null;
     }
 
-    // Проверяем pathname: должен быть /UserName или /UserName/
-    // Имя пользователя: буквы, цифры, подчёркивание, 1–15 символов
     const match = url.pathname.match(/^\/([A-Za-z0-9_]{1,15})\/?$/);
     if (!match) {
       return null;
     }
 
     const username = match[1];
-
-    // Исключаем системные пути (home, explore, notifications и т.д.)
     if (RESERVED_USERNAMES.has(username.toLowerCase())) {
       return null;
     }
@@ -78,60 +96,63 @@ const LinkDetector = (function () {
   }
 
   /**
-   * Обработчик движения мыши (фаза захвата, чтобы Twitter не перехватил).
+   * Обработчик движения мыши (фаза захвата).
    */
   function handleMouseMove(event) {
     const target = event.target;
 
-    // Если курсор над тултипом — отменяем таймер скрытия
+    // Если курсор над тултипом — отменяем скрытие
     if (Tooltip.isMouseOver(event)) {
       clearTimeout(hideTimer);
       hideTimer = null;
       return;
     }
 
-    // Если курсор всё ещё над текущей ссылкой (включая вложенные элементы)
-    if (currentLink && (target === currentLink || currentLink.contains(target))) {
+    // Если курсор всё ещё над текущим целевым элементом (или внутри него)
+    if (currentTarget && (target === currentTarget || currentTarget.contains(target))) {
       return;
     }
 
-    // Ищем профильную ссылку, начиная с элемента под курсором
+    // Шаг 1: ищем текстовое упоминание @UserName
+    const mention = findUserMention(target);
+    if (mention) {
+      enterTarget(mention.element, mention.username);
+      return;
+    }
+
+    // Шаг 2: если текст не подошёл — проверяем ссылку по адресу
     const userLink = findUserLink(target);
     if (userLink) {
-      enterLink(userLink.element, userLink.username);
+      enterTarget(userLink.element, userLink.username);
       return;
     }
 
-    // Курсор ни над ссылкой-профилем, ни над тултипом
-    maybeLeaveLink();
+    // Курсор ни над упоминанием, ни над ссылкой-профилем, ни над тултипом
+    maybeLeaveTarget();
   }
 
   /**
-   * Курсор вошёл на новую ссылку-профиль.
-   * @param {HTMLAnchorElement} link
-   * @param {string} username — уже извлечённое из URL имя пользователя
+   * Курсор вошёл на подходящий элемент.
+   * @param {HTMLElement} el
+   * @param {string} username
    */
-  function enterLink(link, username) {
-    // Если это та же самая ссылка — отменяем скрытие
-    if (currentLink === link) {
+  function enterTarget(el, username) {
+    if (currentTarget === el) {
       clearTimeout(hideTimer);
       hideTimer = null;
       return;
     }
 
-    // Перешли на другую ссылку — закрываем текущий тултип (с сохранением, если закреплён)
-    if (currentLink && currentLink !== link) {
+    if (currentTarget && currentTarget !== el) {
       clearTimers();
       Tooltip.saveAndHide();
     }
 
-    currentLink = link;
+    currentTarget = el;
 
-    // Запускаем таймер на показ
     clearTimeout(showTimer);
     showTimer = setTimeout(async () => {
       const text = await Storage.get(username);
-      // Показываем тултип справа экрана (targetElement больше не нужен для позиции)
       Tooltip.show(username, text);
     }, 500);
   }
@@ -139,26 +160,23 @@ const LinkDetector = (function () {
   /**
    * Проверяет, нужно ли запускать таймер скрытия.
    */
-  function maybeLeaveLink() {
-    if (!currentLink) {
+  function maybeLeaveTarget() {
+    if (!currentTarget) {
       return;
     }
 
-    // Если тултип закреплён (Ctrl) — не скрываем, просто сбрасываем currentLink
     if (Tooltip.getIsSticky()) {
-      currentLink = null;
+      currentTarget = null;
       clearTimeout(hideTimer);
       return;
     }
 
-    // Запускаем таймер скрытия на 0.5 сек
     clearTimeout(hideTimer);
     hideTimer = setTimeout(() => {
       Tooltip.hide();
-      currentLink = null;
+      currentTarget = null;
     }, 500);
 
-    // Отменяем таймер показа, если пользователь увёл мышь раньше 0.5 сек
     clearTimeout(showTimer);
     showTimer = null;
   }
@@ -186,12 +204,10 @@ const LinkDetector = (function () {
    * Инициализирует отслеживание.
    */
   function init() {
-    // capture: true — ловим событие до того, как Twitter вызовет stopPropagation
     document.addEventListener('mousemove', handleMouseMove, true);
     document.addEventListener('keydown', handleKeyDown);
   }
 
-  // Публичный API
   return {
     init
   };

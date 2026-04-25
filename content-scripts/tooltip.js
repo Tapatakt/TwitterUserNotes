@@ -14,6 +14,8 @@ const Tooltip = (function () {
   let isSticky = false;
   let onSaveCallback = null;
   let isSaving = false;
+  // DOM-элемент заголовка с ником
+  let headerEl = null;
 
   /**
    * Создаёт DOM-элемент подсказки, если его ещё нет.
@@ -41,6 +43,17 @@ const Tooltip = (function () {
       display: 'none',
       minWidth: '200px',
       maxWidth: '300px'
+    });
+
+    // Заголовок с ником пользователя
+    headerEl = document.createElement('div');
+    headerEl.id = 'twitter-user-note-header';
+    Object.assign(headerEl.style, {
+      fontSize: '12px',
+      fontWeight: 'bold',
+      color: '#555555',
+      marginBottom: '4px',
+      fontFamily: 'sans-serif'
     });
 
     textareaEl = document.createElement('textarea');
@@ -74,6 +87,7 @@ const Tooltip = (function () {
       saveAndHide();
     });
 
+    tooltipEl.appendChild(headerEl);
     tooltipEl.appendChild(textareaEl);
     document.body.appendChild(tooltipEl);
   }
@@ -87,6 +101,7 @@ const Tooltip = (function () {
     ensureCreated();
     currentUsername = username;
     isSticky = false;
+    headerEl.textContent = '@' + username;
     textareaEl.value = initialText;
     tooltipEl.style.display = 'block';
   }
